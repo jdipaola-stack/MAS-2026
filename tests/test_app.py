@@ -26,6 +26,9 @@ def test_step_parameter_change_reset_and_light_render():
         assert model.value.num_fish == 12
         assert model.value.light_enabled
         assert model.value.preferred_light == 0.75
+        context.find(widgets.Select, label="Navigation experiment").widget.v_model = "Recruitment"
+        context.find(widgets.Btn, children=["Reset"]).widget.fire_event("click", {})
+        assert model.value.navigation_mode == "Recruitment"
         context.find(widgets.Btn, children=["Step"]).widget.fire_event("click", {})
         assert model.value.steps == 2
         assert len(model.value.datacollector.get_model_vars_dataframe()) == 3

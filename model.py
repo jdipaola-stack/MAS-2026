@@ -80,10 +80,15 @@ class Fish(mesa.Agent):
         self.age = 0.0 if newborn else model.maturity_time
         self.safe_time = 0.0
         self.school_neighbors = 0
+        self.informed = True
         model.space.place_agent(self, tuple(position))
 
     def plan(self):
         m = self.model
+        if m.navigation_mode == "Paper model":
+            from paper_rules import plan_paper_fish
+            plan_paper_fish(self)
+            return
         position = m.positions[self.index]
         forward = m.directions[self.index]
         offsets = m.positions - position
@@ -95,6 +100,9 @@ class Fish(mesa.Agent):
         visible &= np.abs(angles) <= math.radians(m.vision_angle) / 2
         # Very close neighbours trigger avoidance even in the rear blind region.
         close = others & (distances < m.repulsion_radius)
+        if not m.social_enabled:
+            visible[:] = False
+            close[:] = False
         self.school_neighbors = int(np.count_nonzero(visible))
         self.next_state = "schooling" if self.school_neighbors >= m.school_min_neighbors else "roaming"
         steering = np.zeros(2)
@@ -108,7 +116,8 @@ class Fish(mesa.Agent):
         elif np.any(visible):
             attraction = unit(offsets[visible].mean(axis=0))
             alignment = unit(m.directions[visible].mean(axis=0))
-            steering = m.attraction_weight * attraction + m.alignment_weight * alignment
+            steering = (m.attraction_weight * attraction + m.alignment_weight * alignment
+                        + m.recruitment_steering(self.index, visible))
 
         # Anticipate the walls; reflection below is a final containment safeguard.
         margin = m.wall_margin
@@ -116,7 +125,7 @@ class Fish(mesa.Agent):
             max(0, 1 - position[0] / margin) - max(0, 1 - (m.width - position[0]) / margin),
             max(0, 1 - position[1] / margin) - max(0, 1 - (m.height - position[1]) / margin),
         ])
-        light_response = m.school_light_steering(self.index, visible)
+        light_response = m.navigation_steering(self.index, visible)
         danger = m.predator_response(position)
         escaping = np.linalg.norm(danger) > 0
         if escaping:
@@ -128,7 +137,13 @@ class Fish(mesa.Agent):
         turn = (target_heading - self.heading + error + math.pi) % (2 * math.pi) - math.pi
         self.next_heading = self.heading + float(np.clip(turn, -m.max_turn * m.dt, m.max_turn * m.dt))
 
-        target_speed = m.speed_from_light(m.light_at(position)) if m.light_enabled else m.base_speed
+        # Uninformed fish never inspect light, including through speed modulation.
+        if m.light_enabled and self.informed:
+            target_speed = m.speed_from_light(m.light_at(position))
+        elif not self.informed and np.any(visible):
+            target_speed = float(np.mean(m.speeds[visible]))
+        else:
+            target_speed = m.base_speed
         if np.any(visible) and m.speed_regulation > 0:
             # A neighbour ahead encourages catching up; a close fish ahead slows us.
             longitudinal = offsets @ forward
@@ -173,7 +188,21 @@ class GoldenShinerModel(mesa.Model):
                  noise=0.15, dt=0.1, light_enabled=False, preferred_light=0.25,
                  light_tolerance=0.10, light_weight=3.0, school_min_neighbors=2,
                  lifecycle_enabled=True, survival_time=60.0, recovery_time=15.0,
-                 reproduction_time=20.0, maturity_time=30.0, max_population=200, seed=42):
+                 reproduction_time=20.0, maturity_time=30.0, max_population=200,
+                 navigation_mode="Shared sensing", informed_fraction=0.1,
+                 recruitment_enabled=True, recruitment_weight=2.0, social_enabled=True,
+                 safety_hold_time=2.0, start_away=False, seed=42,
+                 paper_species="Shiners", gradient_weight=31.6, gradient_error=0.0,
+                 paper_habitat="Moving patch", environmental_noise=0.25, patch_speed=1.142):
+        navigation_mode = str(navigation_mode).replace("_", " ").strip().capitalize()
+        if navigation_mode == "Paper model":
+            # Table S1: 5 cm per BL, 140 cm square arena; 8 updates per second.
+            width = height = 28.0
+            repulsion_radius, interaction_radius = 0.5, 5.5
+            vision_angle, noise, dt = 270.0, 0.01, 0.125
+            min_speed, max_speed, max_turn = 0.2, 5.0, 1.75 / dt
+            # The paper prefers darkness; 25% is an observation/lifecycle threshold.
+            preferred_light, light_tolerance = 0.0, 0.25
         parameters = dict(width=width, height=height, interaction_radius=interaction_radius,
                           repulsion_radius=repulsion_radius, repulsion_weight=repulsion_weight,
                           attraction_weight=attraction_weight, alignment_weight=alignment_weight,
@@ -183,7 +212,20 @@ class GoldenShinerModel(mesa.Model):
                           preferred_light=preferred_light, light_tolerance=light_tolerance,
                           light_weight=light_weight, survival_time=survival_time,
                           recovery_time=recovery_time, reproduction_time=reproduction_time,
-                          maturity_time=maturity_time)
+                          maturity_time=maturity_time, informed_fraction=informed_fraction,
+                          recruitment_weight=recruitment_weight, safety_hold_time=safety_hold_time,
+                          gradient_weight=gradient_weight, gradient_error=gradient_error,
+                          environmental_noise=environmental_noise, patch_speed=patch_speed)
+        if navigation_mode not in ("Shared sensing", "Informed minority", "Recruitment", "Paper model"):
+            raise ValueError("Unknown navigation_mode")
+        if paper_species not in ("Shiners", "Tetras", "Custom weight"):
+            raise ValueError("paper_species must be Shiners, Tetras, or Custom weight")
+        if paper_habitat not in ("Moving patch", "Vertical gradient"):
+            raise ValueError("paper_habitat must be Moving patch or Vertical gradient")
+        if min(gradient_weight, gradient_error, environmental_noise, patch_speed) < 0:
+            raise ValueError("Paper weights, noise, and patch speed cannot be negative")
+        if environmental_noise > 1:
+            raise ValueError("environmental_noise must be in [0, 1]")
         if isinstance(num_fish, bool) or not isinstance(num_fish, (int, np.integer)) or num_fish < 1:
             raise ValueError("num_fish must be a positive integer")
         for name, value in (("school_min_neighbors", school_min_neighbors), ("max_population", max_population)):
@@ -197,10 +239,10 @@ class GoldenShinerModel(mesa.Model):
             raise ValueError("All numeric parameters must be finite")
         for name in ("width", "height", "interaction_radius", "repulsion_radius", "min_speed",
                      "max_speed", "max_acceleration", "max_turn", "dt", "survival_time",
-                     "recovery_time", "reproduction_time", "maturity_time"):
+                     "recovery_time", "reproduction_time", "maturity_time", "safety_hold_time"):
             if parameters[name] <= 0:
                 raise ValueError(f"{name} must be positive")
-        for name in ("repulsion_weight", "attraction_weight", "alignment_weight", "speed_regulation", "noise", "light_weight"):
+        for name in ("repulsion_weight", "attraction_weight", "alignment_weight", "speed_regulation", "noise", "light_weight", "recruitment_weight"):
             if parameters[name] < 0:
                 raise ValueError(f"{name} cannot be negative")
         if not min_speed <= base_speed <= max_speed:
@@ -209,6 +251,8 @@ class GoldenShinerModel(mesa.Model):
             raise ValueError("vision_angle must be in (0, 360]")
         if not 0 <= preferred_light <= 1:
             raise ValueError("preferred_light must be in [0, 1]")
+        if not 0 <= informed_fraction <= 1:
+            raise ValueError("informed_fraction must be in [0, 1]")
         if not 0 < light_tolerance <= 1:
             raise ValueError("light_tolerance must be in (0, 1]")
         if repulsion_radius >= interaction_radius:
@@ -219,6 +263,19 @@ class GoldenShinerModel(mesa.Model):
         for name, value in parameters.items():
             setattr(self, name, float(value))
         self.num_fish = num_fish
+        self.navigation_mode = navigation_mode
+        self.paper_species = paper_species
+        self.paper_habitat = paper_habitat
+        self.effective_gradient_weight = {"Shiners": 0.0, "Tetras": 31.6,
+                                          "Custom weight": gradient_weight}[paper_species]
+        self.sensing_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(1)[0])
+        self.light_field = None
+        if navigation_mode == "Paper model" and paper_habitat == "Moving patch":
+            from paper_rules import MovingLightField
+            self.light_field = MovingLightField(width, height, seed, environmental_noise, patch_speed)
+        self.social_enabled = bool(social_enabled)
+        self.recruitment_enabled = bool(recruitment_enabled)
+        self.start_away = bool(start_away)
         self.initial_population = num_fish
         self.school_min_neighbors = school_min_neighbors
         self.lifecycle_enabled = bool(lifecycle_enabled)
@@ -242,7 +299,25 @@ class GoldenShinerModel(mesa.Model):
             radius = math.sqrt(self.random.random()) * min(width, height) * 0.3
             position = np.array([width / 2 + radius * math.cos(angle),
                                  height / 2 + radius * math.sin(angle)])
+            if self.start_away:
+                # Identical starting coordinates across comparison treatments.
+                disk_radius = radius / (min(width, height) * 0.3)
+                center_y = 0.75 if self.preferred_light < 0.5 else 0.25
+                position = np.array([width / 2 + disk_radius * width * 0.25 * math.cos(angle),
+                                     height * (center_y + disk_radius * 0.10 * math.sin(angle))])
             self.fish.append(Fish(self, index, position, self.random.uniform(-math.pi, math.pi)))
+        if self.navigation_mode == "Informed minority":
+            # A fixed shuffle makes fractions nested and leaves the RNG state
+            # identical across fractions at a given seed and population size.
+            ranking = list(range(num_fish))
+            self.random.shuffle(ranking)
+            informed_indices = set(ranking[:math.floor(num_fish * informed_fraction + 0.5)])
+            for fish in self.fish:
+                fish.informed = fish.index in informed_indices
+        self.cohort_roles = {fish.unique_id: fish.informed for fish in self.fish}
+        self.arrival_times = {fish.unique_id: None for fish in self.fish}
+        self.arrival_dwell = {fish.unique_id: 0.0 for fish in self.fish}
+        self.time_all_together = None
         self.refresh_snapshot()
         self.update_metrics()
         reporters = {name: (lambda model, key=name: model.metrics[key]) for name in self.metrics}
@@ -251,12 +326,22 @@ class GoldenShinerModel(mesa.Model):
         self.datacollector.collect(self)
 
     def light_at(self, position):
-        """Local brightness depends only on y: dark bottom, bright top."""
-        return float(np.clip(position[1] / self.height + self.light_offset, 0, 1))
+        """Query the same field used for agent speeds, health, and rendering."""
+        return float(self.light_values(position))
+
+    def light_values(self, positions):
+        positions = np.asarray(positions)
+        if self.light_field is not None:
+            values = self.light_field.values(positions, self.steps * self.dt)
+        else:
+            values = positions[..., 1] / self.height
+        return np.clip(values + self.light_offset, 0, 1)
 
     @property
     def preferred_band(self):
         """Vertical bounds of the acceptable light range, in body lengths."""
+        if self.light_field is not None:
+            raise ValueError("A moving patch has a contour, not a horizontal band")
         # Include saturated dark/bright regions when they are acceptable.
         low, high = self.preferred_light - self.light_tolerance, self.preferred_light + self.light_tolerance
         bottom = 0.0 if low <= 0 else np.clip(low - self.light_offset, 0, 1) * self.height
@@ -281,8 +366,40 @@ class GoldenShinerModel(mesa.Model):
         response = np.clip((self.preferred_light - predicted_light) / self.light_tolerance, -1, 1)
         return self.light_weight * response * unit(gradient)
 
+    def navigation_steering(self, index, neighbors):
+        if not self.light_enabled:
+            return np.zeros(2)
+        if self.navigation_mode == "Paper model":
+            from paper_rules import environmental_direction
+            return self.effective_gradient_weight * environmental_direction(self, index)
+        if self.navigation_mode == "Shared sensing":
+            return self.school_light_steering(index, neighbors)
+        if self.navigation_mode == "Recruitment" or not self.fish[index].informed:
+            return np.zeros(2)
+        # Only informed agents can probe the local light field for a direction.
+        position = self.positions[index]
+        probe = 0.5
+        gradient = np.array([
+            (self.light_at(position + axis * probe) - self.light_at(position - axis * probe)) / (2 * probe)
+            for axis in np.eye(2)
+        ])
+        predicted = self.light_at(position) + float(gradient @ self.directions[index]) * self.speeds[index]
+        correction = np.clip((self.preferred_light - predicted) / self.light_tolerance, -1, 1)
+        return self.light_weight * correction * unit(gradient)
+
+    def recruitment_steering(self, index, neighbors):
+        """Follow visible fish currently signaling safe light; no remote beacon."""
+        if self.navigation_mode != "Recruitment" or not self.recruitment_enabled or not self.social_enabled:
+            return np.zeros(2)
+        senders = neighbors & self.signaling
+        if not np.any(senders):
+            return np.zeros(2)
+        return self.recruitment_weight * unit(self.positions[senders].mean(axis=0) - self.positions[index])
+
     def speed_from_light(self, intensity):
         """Swim slowly near the optimum; faster when either too bright or too dark."""
+        if self.navigation_mode == "Paper model":
+            return self.min_speed + float(np.clip(intensity, 0, 1)) * (self.max_speed - self.min_speed)
         mismatch = abs(float(np.clip(intensity, 0, 1)) - self.preferred_light)
         maximum_mismatch = max(self.preferred_light, 1 - self.preferred_light)
         return self.min_speed + mismatch / maximum_mismatch * (self.max_speed - self.min_speed)
@@ -295,7 +412,45 @@ class GoldenShinerModel(mesa.Model):
         self.headings = np.array([fish.heading for fish in self.fish])
         self.speeds = np.array([fish.speed for fish in self.fish])
         self.directions = np.column_stack((np.cos(self.headings), np.sin(self.headings)))
-        self.brightness = np.clip(self.positions[:, 1] / self.height + self.light_offset, 0, 1)
+        self.brightness = self.light_values(self.positions)
+        self.signaling = ((np.abs(self.brightness - self.preferred_light) <= self.light_tolerance + 1e-12)
+                          & (self.navigation_mode == "Recruitment") & self.light_enabled & self.recruitment_enabled)
+
+    def record_arrivals(self):
+        """Observer-only safety measurement; agents cannot use these records."""
+        if not self.light_enabled:
+            return
+        now = self.steps * self.dt
+        live_ids = set()
+        for fish, intensity in zip(self.fish, self.brightness, strict=True):
+            identifier = fish.unique_id
+            if identifier not in self.arrival_times:
+                continue  # Newborns do not change the experimental denominator.
+            live_ids.add(identifier)
+            if abs(intensity - self.preferred_light) <= self.light_tolerance + 1e-12:
+                self.arrival_dwell[identifier] += self.dt
+            else:
+                self.arrival_dwell[identifier] = 0.0
+            if self.arrival_times[identifier] is None and self.arrival_dwell[identifier] + 1e-9 >= self.safety_hold_time:
+                self.arrival_times[identifier] = now
+        if (self.time_all_together is None and live_ids == set(self.arrival_times)
+                and all(value + 1e-9 >= self.safety_hold_time for value in self.arrival_dwell.values())):
+            self.time_all_together = now
+
+    def arrival_summary(self):
+        times = sorted(value for value in self.arrival_times.values() if value is not None)
+        size = len(self.arrival_times)
+        uninformed = [identifier for identifier, informed in self.cohort_roles.items() if not informed]
+
+        def quantile_time(fraction):
+            rank = max(1, math.ceil(size * fraction))
+            return times[rank - 1] if len(times) >= rank else None
+
+        return {"success": len(times) == size, "fraction_arrived": len(times) / size,
+                "uninformed_fraction_arrived": sum(self.arrival_times[i] is not None for i in uninformed) / len(uninformed) if uninformed else None,
+                "time_first_s": times[0] if times else None, "time_50_s": quantile_time(0.5),
+                "time_90_s": quantile_time(0.9), "time_all_s": quantile_time(1),
+                "time_all_together_s": self.time_all_together}
 
     def update_metrics(self):
         self.metrics = measure_school(self.positions, self.headings, self.speeds, self.interaction_radius)
@@ -303,6 +458,7 @@ class GoldenShinerModel(mesa.Model):
         mismatch = np.abs(brightness - self.preferred_light)
         has_light = self.light_enabled and self.num_fish > 0
         self.metrics["Mean brightness"] = float(np.mean(brightness)) if has_light else float("nan")
+        self.metrics["Mean darkness (raw psi)"] = float(np.mean(1 - brightness)) if has_light else float("nan")
         self.metrics["Fraction in dark region"] = float(np.mean(brightness <= 0.25)) if has_light else float("nan")
         self.metrics["Mean light error"] = float(np.mean(mismatch)) if has_light else float("nan")
         self.metrics["Fraction in preferred band"] = float(np.mean(mismatch <= self.light_tolerance + 1e-12)) if has_light else float("nan")
@@ -312,6 +468,13 @@ class GoldenShinerModel(mesa.Model):
                              "Schooling fraction": float(np.mean([f.school_neighbors >= self.school_min_neighbors for f in self.fish])) if self.fish else 0.0,
                              "Predator active": int(self.predator_position is not None),
                              "Storm active": int(self.storm_until > self.steps * self.dt)})
+        arrivals = self.arrival_summary()
+        self.metrics.update({"Informed fish": sum(f.informed for f in self.fish),
+                             "Signaling fish": int(np.count_nonzero(self.signaling)),
+                             "Starting cohort reached safety": arrivals["fraction_arrived"],
+                             "Uninformed cohort reached safety": arrivals["uninformed_fraction_arrived"],
+                             "Time for last arrival (s)": arrivals["time_all_s"],
+                             "Time all safe together (s)": arrivals["time_all_together_s"]})
         p, r = self.metrics["Polarization"], self.metrics["Rotation"]
         if self.num_fish == 0:
             self.collective_state = "Extinct"
@@ -337,6 +500,7 @@ class GoldenShinerModel(mesa.Model):
         self.agents.do("advance")
         self.update_population()
         self.refresh_snapshot()
+        self.record_arrivals()
         self.update_metrics()
         self.datacollector.collect(self)
         if not self.fish:
@@ -393,6 +557,8 @@ class GoldenShinerModel(mesa.Model):
             position = center + self.repulsion_radius * np.array([math.cos(angle), math.sin(angle)])
             position = np.clip(position, [0, 0], np.nextafter([self.width, self.height], [0, 0]))
             child = Fish(self, len(self.fish), position, parent.heading, newborn=True)
+            if self.navigation_mode == "Informed minority":
+                child.informed = self.random.random() < self.informed_fraction
             self.fish.append(child)
             self.births += 1
             parent.safe_time = mate.safe_time = 0.0

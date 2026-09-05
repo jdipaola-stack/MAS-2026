@@ -40,6 +40,10 @@ def main():
     parser.add_argument("--preferred-light", type=float, default=0.25)
     parser.add_argument("--light-tolerance", type=float, default=0.10)
     parser.add_argument("--light-weight", type=float, default=3.0)
+    parser.add_argument("--mode", choices=["shared_sensing", "informed_minority", "recruitment"], default="shared_sensing")
+    parser.add_argument("--informed-fraction", type=float, default=0.1)
+    parser.add_argument("--no-signals", action="store_true")
+    parser.add_argument("--independent", action="store_true")
     parser.add_argument("--no-lifecycle", action="store_true")
     parser.add_argument("--survival-time", type=float, default=60.0)
     parser.add_argument("--reproduction-time", type=float, default=20.0)
@@ -51,7 +55,9 @@ def main():
                            alignment_weight=args.alignment, light_enabled=args.light,
                            preferred_light=args.preferred_light, light_tolerance=args.light_tolerance,
                            light_weight=args.light_weight, lifecycle_enabled=not args.no_lifecycle,
-                           survival_time=args.survival_time, reproduction_time=args.reproduction_time)
+                           survival_time=args.survival_time, reproduction_time=args.reproduction_time,
+                           navigation_mode=args.mode, informed_fraction=args.informed_fraction,
+                           recruitment_enabled=not args.no_signals, social_enabled=not args.independent)
     print(f"Saved {args.output} and its JSON settings ({model.steps * model.dt:.1f} simulated seconds)")
     print(f"Final state: {model.collective_state}; polarization: {model.metrics['Polarization']:.3f}; "
           f"rotation: {model.metrics['Rotation']:.3f}")

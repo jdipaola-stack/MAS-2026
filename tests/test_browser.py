@@ -85,6 +85,13 @@ def test_fish_visible_and_controls_update_browser():
             playwright.expect(page.get_by_label("Enable light gradient")).to_be_checked()
             page.get_by_role("button", name="Reset", exact=True).click()
             wait_for_tank(lambda rendered: "BRIGHT" in rendered and simulation_time(rendered) == 0)
+            playwright.expect(page.get_by_text("6 informed (orange rings)", exact=False)).to_be_visible()
+            page.locator(".v-select").filter(has=page.get_by_label("Navigation experiment", exact=True)).locator(".v-select__selections").click()
+            page.get_by_role("option", name="Recruitment", exact=True).click()
+            page.get_by_role("button", name="Reset", exact=True).click()
+            playwright.expect(page.get_by_text("fish signaling safe light (green rings)", exact=False)).to_be_visible()
+            page.get_by_role("button", name="Step", exact=True).click()
+            wait_for_tank(lambda rendered: simulation_time(rendered) > 0)
             assert not errors, "Browser errors: " + "; ".join(errors)
         finally:
             browser.close()

@@ -7,7 +7,9 @@ and an optional light gradient. The school forms from these individual rules.
 The interactive app starts with light enabled: **dark at the bottom, bright at
 the top**, with a preferred light level of **25%**. The green band shows the
 acceptable 15–35% range. Fish seek this band while continuing to swim together.
-Navigation requires shared light readings from schoolmates. Fish lose health in
+The default interactive experiment gives **10% of fish direct light sensing**;
+the uninformed majority follows nearby fish. The **Navigation experiment** menu
+also offers **Recruitment** and the earlier **Shared sensing** mode. Fish lose health in
 unsuitable light, recover and reproduce in suitable light, and can be disturbed
 using the **Predator attack**, **Storm**, and **Clear disturbances** buttons.
 
@@ -47,8 +49,11 @@ reproduce it; use `requirements.txt` on other platforms.
 | `app.py` | Mesa/Solara interactive controls, tank view, plots, CSV download |
 | `run.py` | Run one simulation without a browser; save CSV and JSON settings |
 | `experiments.py` | Repeat runs over alignment strengths and summarise results |
+| `research_experiments.py` | Matched minority and recruitment experiments, arrival times, censoring and comparison charts |
+| `EXPERIMENT_RESULTS.md` | Five-run pilot results and their limitations |
 | `tests/test_model.py` | Behaviour, numerical limits, reproducibility, metrics and export checks |
 | `tests/test_app.py` | Actual Step/Reset controls, parameter changes and light-mode plotting |
+| `tests/test_research.py` | Information access, local signaling, independent controls and arrival accounting |
 
 ## What happens at each time step?
 
@@ -58,8 +63,7 @@ reproduce it; use `requirements.txt` on other platforms.
    repulsion is active it takes priority over attraction and alignment.
 4. Otherwise, the fish combines attraction toward visible neighbours and optional
    alignment with their headings. Previous heading provides movement persistence.
-5. Add wall avoidance, collective light-seeking when enough neighbours share
-   readings, and a small
+5. Add wall avoidance, the selected navigation or recruitment response, and a small
    random turn. Limit turning and acceleration.
 6. Calculate speed from the baseline (or distance from preferred brightness), then adjust it in
    response to visible neighbours ahead or behind.
@@ -72,6 +76,8 @@ reproduce it; use `requirements.txt` on other platforms.
 Schooling requires at least two visible neighbours by default. Smaller local
 groups are labelled roaming. A fish near a predator switches to escaping.
 These individual states are separate from group labels such as milling.
+The label does not grant light knowledge: sensing and signaling depend on the
+selected experiment, as described below.
 
 All distances use **body lengths (BL)**. One tick represents **0.1 seconds** by
 default, and the tank is 60 × 40 BL. A fish's body length is the unit of distance;
@@ -99,6 +105,13 @@ by the body length measured in your chosen dataset.
 | `preferred_light` | 0.25 | Desired brightness: 0 is fully dark; 1 is fully bright |
 | `light_tolerance` | 0.10 | Acceptable deviation from the preferred level (10 percentage points) |
 | `light_weight` | 3 | Strength of steering toward preferred light; 0 disables this steering |
+| `navigation_mode` | Shared sensing in Python; Informed minority in the app | Select which information individuals can use |
+| `informed_fraction` | 0.10 | Fraction with direct light sensing in the minority experiment |
+| `recruitment_enabled` | True | Enable local safe-light signals in Recruitment mode |
+| `recruitment_weight` | 2 | Attraction toward visible signaling neighbours |
+| `social_enabled` | True | Enable neighbour interactions; False makes independent searches |
+| `safety_hold_time` | 2 s | Required uninterrupted residence before an arrival counts |
+| `start_away` | False in Python; True in the app | Start a matched cluster on the side away from preferred light |
 | `school_min_neighbors` | 2 | Number of visible schoolmates required for light-direction estimation |
 | `lifecycle_enabled` | True | Enable health loss, recovery and reproduction when light is enabled |
 | `survival_time` | 60 s | Time for full health to drain just outside the safe band; extreme light drains it faster |
@@ -151,6 +164,19 @@ print(data.tail())
 - **Schooling fraction:** fraction with enough visible neighbours during their
   last sensing step; being close to the whole school is not sufficient.
 - **Predator active, storm active:** 1 during an event and 0 otherwise.
+- **Informed fish, signaling fish:** current counts of light sensors and active
+  safe-light signals. Orange rings identify informed fish in the minority mode;
+  green rings identify signaling fish in recruitment mode.
+- **Starting cohort reached safety:** fraction of the original fish that have
+  completed the safety residence requirement at least once. Births cannot enlarge
+  this denominator, and deaths cannot shrink it.
+- **Uninformed cohort reached safety:** the same measure for initially uninformed
+  fish only; undefined if all starting fish are informed.
+- **Time for last arrival:** maximum first qualified arrival time over the entire
+  starting cohort. Undefined until every original fish has arrived.
+- **Time all safe together:** first time all original fish are alive and have
+  simultaneously met the residence requirement. This is distinct from each fish
+  having arrived at some point and subsequently left.
 
 An extinct population has zero counts and group-order measures; average light
 and nearest-neighbour distance are undefined. The interface stops and offers Reset.
@@ -168,6 +194,7 @@ Fish at the same height experience the same light, whatever their x coordinate.
 The preferred 25% level lies at y = 10 BL in the default 40 BL-high tank. Its
 acceptable 15–35% band spans y = 6–14 BL.
 
+The following rules describe **Shared sensing**, retained from the earlier model.
 Each fish senses **only its local brightness**, not the true environmental
 gradient. Finding a direction requires information from the local school:
 
@@ -198,7 +225,7 @@ are applied. Fish keep moving inside the band; the model does not freeze them
 or move them instantly to the target. Baseline speed controls their initial speed
 in light mode. The environment determines the ongoing target speed.
 
-**These are modelling assumptions:** fish share local brightness information,
+**In Shared sensing these are modelling assumptions:** fish share local brightness information,
 and at least three locally connected fish are needed to estimate a direction.
 The 25% value is the project's selected preference, not a measured biological
 optimum for golden shiners. The information-sharing rule provides a concrete
@@ -210,6 +237,95 @@ Reset after changing parameters. Measure both occupancy of the band and cohesion
 fish can share a light preference while still splitting into separate groups.
 Strong social weights, weak light response, high noise, extreme targets near walls,
 or very narrow tolerances can reduce success. Compare settings over multiple seeds.
+
+## Two controlled experiments
+
+### 1. Informed minority / uninformed majority
+
+Only the selected fraction can measure local light and probe its gradient. The
+remaining fish have **no light-dependent steering or speed response**. They
+follow neighbours' positions, headings and speeds, treating all neighbours
+equally; they do not recognise an informed individual or receive a global target.
+An isolated uninformed fish has no directed ability to find preferred light,
+although chance arrival remains possible. This makes the 0%-informed control
+necessary.
+
+The experiment is inspired by [Couzin et al., *Effective leadership and
+decision-making in animal groups on the move* (2005)](https://www.nature.com/articles/nature03236).
+It adapts the informed/uninformed design to the light-band task, rather than
+reproducing that paper's equations or claiming calibrated golden-shiner biology.
+
+Starting role assignments use a seeded ranking: increasing the informed fraction
+adds informed fish from the same ranking while retaining positions and headings.
+Counts are rounded to the nearest whole fish (half up); exports record the actual
+fraction. For example, 5% of 30 fish becomes 2 fish, or 6.7%.
+
+### 2. Recruitment versus independent search
+
+All fish can sense **local intensity**, and swim more slowly near their preferred
+light. They cannot directly sense a gradient in this mode. A fish currently in
+safe light broadcasts an abstract “I found it” signal; visible nearby fish are
+attracted to its current position. Signals stop when the sender leaves the band
+and never travel beyond the existing viewing-angle and interaction-distance limits.
+This is a proposed communication rule, not a claim that real fish perform a bee dance.
+
+Compare three conditions with matching starting states and seeds:
+
+| Condition | Social following | Safe-light signals |
+| --- | --- | --- |
+| `recruitment` | Yes | Yes |
+| `social_no_signal` | Yes | No |
+| `independent` | No | No |
+
+The independent control advances N noninteracting agents in the same arena
+coordinates: mathematically, N solo searches. They cannot affect one another,
+including through collision avoidance. The maximum of their arrival times is the
+correct baseline for the group's **last** arrival. Individual arrival records also
+give the distribution of a lone searcher's time. Comparing only the group's first
+arrival with one solo search would give a misleading advantage.
+
+The no-signal control separates benefits of ordinary social following from added
+benefits of recruitment. A speed-up is an outcome to test, not something built
+into the success criterion. Signals may improve residence in safety while slowing
+the last first-arrival.
+
+### Run the comparisons
+
+```sh
+python research_experiments.py minority --fractions 0 .05 .1 .25 1 --fish 30 --repeats 10
+python research_experiments.py recruitment --fish 30 --repeats 10
+```
+
+These scripts explicitly disable births, deaths and perturbations and start all
+conditions from matched clusters away from the preferred band. The default
+horizon is 900 steps (90 seconds); an arrival requires 2 consecutive seconds in
+the band. Use `--steps`, `--hold-time`, `--seed`, and `--output` to change these.
+The interactive app retains the ecology and perturbation controls, so disable
+them for manual comparison experiments.
+
+Outputs include:
+
+- Initial positions, headings and sensor roles for each run.
+- Per-fish arrival times and censoring status, plus full measurement time series.
+- `runs.csv`: success, time to 50%, 90%, and all first-arrivals; simultaneous safety;
+  final and late-window occupancy; uninformed arrival fraction.
+- `aggregate.csv`: success rates over **all** runs, successful-only completion
+  times clearly labelled, and restricted completion times.
+- `paired_comparison.csv` for recruitment: comparisons with both controls using
+  matching seeds. Speed-up ratios are reported only when both runs complete.
+- `comparison.png`: success rates and restricted completion times.
+- JSON settings including all model defaults and Mesa version for reproducibility.
+
+A non-arrival remains missing, with the observation horizon recorded as its
+censoring time. Restricted completion time is `min(actual completion, horizon)`;
+it is a capped measure, not an invented successful arrival time. Always interpret
+it alongside success rate. Five-run pilot results and their limitations are in
+[EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md).
+
+If ecology is enabled in the minority mode, a newborn becomes informed with
+probability `informed_fraction`; this is an abstract role assignment. Newborns
+are excluded from the original-cohort arrival measurements. The controlled
+experiments disable this demographic complication entirely.
 
 ## Survival and reproduction
 
@@ -291,7 +407,7 @@ improvement in navigation is guaranteed. A convincing animation alone does not
 validate the individual rules.
 
 The model uses additive social responses, explicit optional alignment and
-preferred-light steering, a simple viewing-angle mask, and point-like agents.
+the selected sensing/signaling mechanism, a simple viewing-angle mask, and point-like agents.
 It omits visual occlusion, experimentally
 fitted interaction functions, three-body effects, and food. Predators and storms
 are simplified perturbations. Repulsion
