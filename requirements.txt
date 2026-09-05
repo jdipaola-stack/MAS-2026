@@ -1,0 +1,11 @@
+mesa[rec]==3.5.1
+solara>=1.44,<2
+# Mesa's draggable plots require Vue 2; Vue 3 fails with GlobalVue.use.
+ipyvue>=1.11,<2
+ipyvuetify>=1.11,<2
+# Solara's server expects AnyIO's pre-4.12 module exports.
+anyio>=4.4,<4.12
+matplotlib>=3.9,<4
+numpy>=2,<3
+pandas>=2.2,<3
+pytest>=8,<10
