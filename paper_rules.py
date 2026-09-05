@@ -4,7 +4,7 @@ Equations 6–7 and supplement equations 4–10 are implemented in body lengths.
 The light generator is our approximation, not the authors' original noise movie.
 See PAPER_MODEL.md for the parameter mapping and replication limits.
 """
-
+###
 import math
 
 import numpy as np
