@@ -236,26 +236,10 @@ class GoldenShinersModel(mesa.Model):
 # ============================================================
 
 def agent_draw(agent):
-
-    # Calculate direction angle
-    angle_rad = np.arctan2(
-        agent.direction[1],
-        agent.direction[0],
-    )
-
-    angle_deg = np.degrees(angle_rad)
-
-    # Triangle pointing in direction of movement
-    marker = MarkerStyle(">")
-
-    marker._transform = (
-        marker.get_transform().rotate_deg(angle_deg)
-    )
-
     return {
         "color": "blue",
         "size": 15,
-        "marker": marker,
+        "marker": ">",
     }
 
 
